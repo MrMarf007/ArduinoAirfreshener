@@ -67,11 +67,11 @@ void setup() {
 unsigned long lastTempCheck = 0, lastDistanceCheck = 0, lastLCDPrint = 0, lastLightCheck = 0, blinker = 0, sprayTimer = 0;
 
 // variables
-int state = 0, toSpray = 0, light=0;
+int state = 0, toSpray = 0, light=0, distance;
 double temp=0;
 
 // lightOn will be updated after one full second of light/darkness, motionDetected is true if there has been motion in the last 5 seconds.
-bool lightOn = false, motionDetected  = false, ledOn = false, sprayOn = false;
+bool lightOn = false, motionDetected  = false, sprayOn = false;
 
 void loop() {
   unsigned long currentMillis = millis();
@@ -81,10 +81,16 @@ void loop() {
     printLCD();
   }
 
+  if (currentMillis - lastTempCheck > 5000) { 
+    lastTempCheck = currentMillis;
+    sensors.requestTemperatures();
+    temp = sensors.getTempCByIndex(0);
+  }
+
   switch (state) {
-    /* ===== not in use - keep checking light and motion to detect a user ===== */
-    case 0:
-      setLeds(0,0);
+    /* ===== not in use - keep checking light and motion to detect a user ===== */ 
+    case 0: // TODO - add motion sensor
+      setLeds(0,0,0,0);
 
       if (currentMillis - lastLightCheck > 50) { 
         lastLightCheck = currentMillis;
@@ -99,17 +105,20 @@ void loop() {
       break;
 
 
-    /* ===== spray triggered ===== */
-    case 5:
-
+    /* ===== spray triggered ===== */    
+    case 5: // TODO - TEST
       // if no more sprays are needed, exit to state 0
       if (toSpray == 0) {
         digitalWrite(ledGreen, LOW);
         state = 0;
       }
 
-      // we need to FRESHEN!
-      // if freshener pin is not on yet, turn it on and start a timer for 25 seconds
+      // LET THE FRESHENING COMMENCE!!!!
+
+      // blink the green light during the FRESHENING
+      setLeds(1,0,1,0);
+
+      // if freshener pin is not on yet, turn it on and start a timer for 22 seconds, then wait 2 seconds so the freshener can turn off fully before possibly doing the second spray
       if (!sprayOn && (currentMillis - sprayTimer > 2000)) {
         digitalWrite(sprayer, HIGH);
         sprayOn = true;
@@ -120,51 +129,72 @@ void loop() {
         sprayOn = false;
         sprayTimer = currentMillis;
       }
-
-      // blink the green light during the FRESHENING
-      if (currentMillis - blinker > 400) { 
-        blinker = currentMillis;
-        ledOn = !ledOn;
-        digitalWrite(ledGreen, ledOn ? HIGH : LOW);
-      }
       break;
-
 
     /* ===== operator menu ===== */
     case 6:
-      if (currentMillis - blinker > 400) { 
-        blinker = currentMillis;
-        ledOn = !ledOn;
-        digitalWrite(ledRed, ledOn ? HIGH : LOW);
-      }
-      if (currentMillis - sprayTimer > 2000) { 
-        digitalWrite(ledRed, LOW);
-        state = 1;
-      }
+      // TODO - implement
+      setLeds(0,0,0,0);
+
       break;
 
-
     /* ===== in use - monitor sensors to determine which type of use ===== */
-    default:
-      setLeds(1,0);
-
-      if (currentMillis - lastTempCheck > 1500) { 
-        lastTempCheck = currentMillis;
-        sensors.requestTemperatures();
-        temp = sensors.getTempCByIndex(0);
+    default: // TODO - implement
+      // configure the LEDs by current state
+      switch (state) {
+        case 1: 
+          setLeds(1,0,0,0); 
+          break;
+        case 2: 
+          setLeds(1,1,0,0); 
+          break;
+        case 3: 
+          setLeds(1,1,0,2); 
+          break;
+        case 4: 
+          setLeds(1,0,0,1); 
+          break;
       }
 
       if (currentMillis - lastDistanceCheck > 300) { 
         lastDistanceCheck = currentMillis;
-        measureDistance();
+        distance = measureDistance();
       }
+
       break;
   }
 }
 
-void setLeds(bool g, bool r) {
-  digitalWrite(ledGreen, g);
-  digitalWrite(ledRed, r);
+
+// params: green on/off, red on/off, green blinkmode (0 = no blink, 1 = slow blink, 2 = fast blink)
+void setLeds(bool g, bool r, int gMode, int rMode) {
+  static bool gOn = false, rOn = false;
+  static unsigned long gBlinker = 0, rBlinker = 0;
+  unsigned long currentMillis = millis();
+
+  if (!g) {
+    digitalWrite(ledGreen, LOW);
+    gOn = false;
+  } else if (gMode == 0) {
+    digitalWrite(ledGreen, HIGH);
+    gOn = true;
+  } else if (currentMillis - gBlinker > (500 / gMode)) { 
+    gBlinker = currentMillis;
+    gOn = !gOn;
+    digitalWrite(ledGreen, gOn ? HIGH : LOW);
+  }
+
+  if (!r) {
+    digitalWrite(ledRed, LOW);
+    rOn = false;
+  } else if (rMode == 0) {
+    digitalWrite(ledRed, HIGH);
+    rOn = true;
+  } else if (currentMillis - rBlinker > (500 / rMode)) { 
+    rBlinker = currentMillis;
+    rOn = !rOn;
+    digitalWrite(ledRed, rOn ? HIGH : LOW);
+  }
 }
 
 void printLCD() {
@@ -206,14 +236,12 @@ void printLCD() {
   }
 }
 
-
-
-// light sensor readings higher than this value will be considered 'light on' 
-int lightThreshold = 600;
-// lightTimer records the last time the sensor had a 'dark' reading
-unsigned long lastDarkTime = 0, lastLightTime  = 0;
-
 void updateLightStatus() {
+  // lightTimer records the last time the sensor had a 'dark' reading
+  static unsigned long lastDarkTime = 0, lastLightTime  = 0;
+  // light sensor readings higher than this value will be considered 'light on' 
+  int lightThreshold = 600;
+
   light = analogRead(lightSensor);
   if (light > lightThreshold) {
     lastLightTime = millis();
@@ -230,20 +258,19 @@ void updateLightStatus() {
   }
 }
 
-long distanceCM, echoTime;
-
-void measureDistance() {
+int measureDistance() {
   digitalWrite(distTrigger, LOW);
   delayMicroseconds(5);
   digitalWrite(distTrigger, HIGH);
   delayMicroseconds(10);
   digitalWrite(distTrigger, LOW);
  
+  long echoTime;
   // get time between trigger and echo
   echoTime = pulseIn(distEcho, HIGH);
  
   // Convert the time into a distance
-  distanceCM = (echoTime/2) / 29.1;
+  return ((echoTime/2) / 29.1);
 }
 
 
@@ -254,8 +281,7 @@ void overrideInterrupt() {
   static unsigned long lastCallTime = 0;
   unsigned long thisCallTime = millis();
   if (thisCallTime - lastCallTime > 75) {
-    digitalWrite(ledRed, LOW);
-    digitalWrite(ledGreen, LOW);
+    // DO STUFF HERE
     toSpray = 1;
     state = 5;
   }
@@ -267,8 +293,7 @@ void selectInterrupt() {
   static unsigned long lastCallTime = 0;
   unsigned long thisCallTime = millis();
   if (thisCallTime - lastCallTime > 75) {
-    digitalWrite(ledRed, LOW);
-    digitalWrite(ledGreen, LOW);
+    // DO STUFF HERE
     sprayTimer = thisCallTime;
     state = 6;
   }
