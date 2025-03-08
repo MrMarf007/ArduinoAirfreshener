@@ -1,6 +1,7 @@
 #include <LiquidCrystal.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <EEPROM.h>
 
 // digital pins
 const int override = 2, 
@@ -22,10 +23,11 @@ LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 OneWire oneWire(thermo);
 DallasTemperature sensors(&oneWire);
 
-
-
+int spraysLeft = 0;
 void setup() {
   Serial.begin (9600);
+
+  spraysLeft = readIntFromEEPROM(0);
 
   // setup all pins
   pinMode(override, INPUT);
@@ -69,16 +71,14 @@ const int notInUse = 0, inUseUnknown = 1, inUse1 = 2, inUse2 = 3, inUseCleaning 
 int state = 0;
 
 // timers
-unsigned long lastTempCheck = 0, lastDistanceCheck = 0, lastLCDPrint = 0, lastLightCheck = 0, lastMagnetCheck = 0, lastMotionCheck = 0, lastMotion = -1UL, blinker = 0, sprayTimer = 0, exitTimer = 0, bigFlush = -1UL, sprayDelay = 0;
+unsigned long lastTempCheck = 0, lastDistanceCheck = 0, lastLCDPrint = 0, lastLightCheck = 0, lastMagnetCheck = 0, lastMotionCheck = 0, lastMotion = -1UL, doorCloseTimer = 0, blinker = 0, sprayTimer = 0, exitTimer = 0, sprayDelay = 0, useStart = 0;
 
 // variables
 const int numberOfMenuItems = 3, numberOfSensors = 5;
 int toSpray = 0, light=0, distance = 0, selectedMenuItem = 0, selectedSensor = 0;
 double temp = 0;
 
-bool lightOn = false, motionDetected = false, sprayOn = false, magnetContact = false;
-
-volatile unsigned int spraysLeft = 2400;
+bool lightOn = false, motionDetected = false, sprayOn = false, magnetContact = false, bigFlush = false, doorClosed = false;
 
 void loop() {
   unsigned long currentMillis = millis();
@@ -103,6 +103,7 @@ void loop() {
       // if both the light is on and motion was detected, the toilet is in use
       if ((millis() - lastMotion < 10000) && lightOn) {
         // state = inUseUnknown;
+        useStart = millis();
       }
 
       break;
@@ -129,6 +130,7 @@ void loop() {
         digitalWrite(sprayer, LOW);
         toSpray--;
         spraysLeft--;
+        updateIntToEEPROM(0, spraysLeft);
         sprayOn = false;
         sprayTimer = currentMillis;
       }
@@ -142,7 +144,7 @@ void loop() {
 
       break;
 
-    /* ===== exiting menu ===== */
+    /* ===== returning to state notInUse ===== */
     case 7:
       setLeds(0,0,0,0);
 
@@ -180,7 +182,7 @@ void loop() {
 
     /* ===== spray delay ===== */
     case 9:
-      setLeds(1,1,2,2);
+      setLeds(1,1,0,0);
 
       if (currentMillis - exitTimer > sprayDelay) {
         state = stateTriggered;
@@ -190,23 +192,63 @@ void loop() {
 
     /* ===== in use - monitor sensors to determine which type of use ===== */
     default: // TODO - implement
-      // configure the LEDs by current state
+      
       switch (state) {
-        case 1: 
+        case inUseUnknown: 
           setLeds(1,0,0,0); 
           break;
-        case 2: 
+        case inUse1: 
           setLeds(1,1,0,0); 
           break;
-        case 3: 
-          setLeds(1,1,0,2); 
+        case inUse2: 
+          setLeds(1,1,0,3); 
           break;
-        case 4: 
+        case inUseCleaning: 
           setLeds(1,0,0,1); 
           break;
       }
 
+      checkLight(100);
       checkDistance(200);
+      checkMagnet(75);
+
+      if (state == inUseUnknown && doorClosed && (useStart - millis() > 15000)) {
+        state = inUse1;
+      }
+
+      if (bigFlush && doorClosed) {
+        state = inUse2;
+      }
+
+      if (!doorClosed && (useStart - millis() > 15000)) {
+        state = inUseCleaning;
+      }
+
+      if (!lightOn) {
+        // light is off, use of toilet ended
+
+        exitTimer = millis();
+        if (useStart - millis() < 20000) {
+          // use was too short, probably an error, no sprays, return to notInUse
+          state = exitMenu;
+        }
+
+        switch (state) {
+          case inUse1:
+            toSpray = 1;
+            state = delaySpray;
+            break;
+          case inUse2:
+            toSpray = 2;
+            state = delaySpray;
+            break;
+          case inUseCleaning:
+            state = exitMenu;
+            break;
+        }
+
+        purge();
+      }
 
       break;
   }
@@ -292,7 +334,7 @@ void printLCD() {
       break;
     case 7: {
       lcd.setCursor(0,0);
-      lcd.print("Device rebooting");
+      lcd.print("Device restarts");
       lcd.setCursor(0,1);
       lcd.print("   in ");
       int val = 15000 - (currentMillis - exitTimer);
@@ -345,13 +387,15 @@ void printLCD() {
           break;
       }
       break;
-      case 9: {
-        lcd.print("waiting to spray");
-        int time = (sprayDelay - (currentMillis - exitTimer)) / 1000;
-        lcd.setCursor(0,1);
-        lcd.print(time);
-        lcd.print("s to go");
-      }
+    case 9: {
+      lcd.setCursor(0,0);
+      lcd.print("waiting to spray");
+      int time = (sprayDelay - (currentMillis - exitTimer)) / 1000;
+      lcd.setCursor(0,1);
+      lcd.print(time);
+      lcd.print("s to go");
+      break;
+    }
     default:
       // NORMAL OPERATION
       lcd.setCursor(0,0);
@@ -415,6 +459,20 @@ void checkDistance(int t) {
   
     // Convert the time into a distance
     distance = ((echoTime/2) / 29.1);
+
+    if (distance > 82 && distance < 88) {
+      doorCloseTimer += t;
+    }
+
+    if (distance > 88) {
+      doorCloseTimer /= 2;
+    }
+
+    if (doorCloseTimer > 8) {
+      doorClosed = true;
+    } else {
+      doorClosed = false;
+    }
   }
 }
 
@@ -434,6 +492,7 @@ void checkMotion(int t) {
     motionDetected = digitalRead(motion);
     if (motionDetected == HIGH) {
       lastMotion = millis();
+      bigFlush = true;
     }
   }
 }
@@ -442,6 +501,7 @@ void purge() {
   setLeds(0,0,0,0);
   digitalWrite(sprayer, LOW);
   digitalWrite(distTrigger, LOW);
+  doorCloseTimer = 0;
   toSpray = 0;
   light=0;
   distance = 0;
@@ -450,9 +510,25 @@ void purge() {
   lightOn = false;
   motionDetected  = false;
   sprayOn = false;
+  bigFlush = false;
 }
 
-unsigned long sprayDelays[6] = {0,5000,10000,30000,60000,120000};
+void updateIntToEEPROM(int address, int number) {
+  uint8_t b1 = (number >> 8) & 0xFF;
+  uint8_t b2 = number & 0xFF;
+
+  EEPROM.update(address, b1);
+  EEPROM.update(address+1, b2);
+}
+
+int readIntFromEEPROM(int address) {
+  uint8_t b1 = EEPROM.read(address);
+  uint8_t b2 = EEPROM.read(address+1);
+
+  return ((b1 << 8) + b2);
+}
+
+unsigned long sprayDelays[8] = {0,5000,10000,30000,60000,120000,180000,360000};
 void activateCurrentMenuItem() {
   if (state == stateMenu) {
     switch (selectedMenuItem) {
@@ -468,11 +544,12 @@ void activateCurrentMenuItem() {
       case 2:
         static unsigned int i = 0;
         i++;
-        if (i == 6) {i = 0;}
+        if (i == 8) {i = 0;}
         sprayDelay = sprayDelays[i];
         break;
       case 3:
         spraysLeft = 2400;
+        updateIntToEEPROM(0, spraysLeft);
         break;
     }
   } else if (state == sensorView) {
