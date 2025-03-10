@@ -71,7 +71,7 @@ const int notInUse = 0, inUseUnknown = 1, inUse1 = 2, inUse2 = 3, inUseCleaning 
 int state = 0;
 
 // timers
-unsigned long lastTempCheck = 0, lastDistanceCheck = 0, lastLCDPrint = 0, lastLightCheck = 0, lastMagnetCheck = 0, lastMotionCheck = 0, lastMotion = -1UL, doorCloseTimer = 0, blinker = 0, sprayTimer = 0, exitTimer = 0, sprayDelay = 0, useStart = 0;
+unsigned long lastTempCheck = 0, lastDistanceCheck = 0, lastLCDPrint = 0, lastLightCheck = 0, lastMagnetCheck = 0, lastMotionCheck = 0, lastMotion = -1UL, doorCloseTimer = 0, blinker = 0, sprayTimer = 0, exitTimer = 0, sprayDelay = 10000, useStart = 0;
 
 // variables
 const int numberOfMenuItems = 3, numberOfSensors = 5;
@@ -90,52 +90,52 @@ void loop() {
 
   switch (state) {
     /* ===== not in use - keep checking light and motion to detect a user ===== */ 
-    case 0: // TODO - add motion sensor
+    case notInUse:
       setLeds(0,0,0,0);
 
-      checkLight(50);
-      checkMotion(50);
-      
-      checkDistance(200);
-
-      checkTemp(1500);
+      checkLight(100);
+      checkMotion(150);
       
       // if both the light is on and motion was detected, the toilet is in use
       if ((millis() - lastMotion < 10000) && lightOn) {
-        // state = inUseUnknown;
+        state = inUseUnknown;
         useStart = millis();
       }
+
+      // keep ambient temp up to date
+      checkTemp(1500);
 
       break;
 
 
     /* ===== spray triggered ===== */    
-    case 5: // TODO - TEST
-      // if no more sprays are needed, exit to state 0
-      if (toSpray == 0) {
-        state = notInUse;
-      }
-
+    case stateTriggered: {// TODO - TEST
       // LET THE FRESHENING COMMENCE!!!!
 
       // blink the green light during the FRESHENING
       setLeds(1,0,1,0);
 
-      // if freshener pin is not on yet, turn it on and start a timer for 22 seconds, then wait 2 seconds so the freshener can turn off fully before possibly doing the second spray
+      // if freshener pin is not on yet, turn it on and start a timer for 18 seconds, then wait 2 seconds so the freshener can turn off fully before possibly doing the second spray
       if (!sprayOn && (currentMillis - sprayTimer > 2000)) {
         digitalWrite(sprayer, HIGH);
         sprayOn = true;
         sprayTimer = currentMillis;
-      } else if (currentMillis - sprayTimer > 18000) { 
+      } else if (sprayOn && currentMillis - sprayTimer > 18000) { 
         digitalWrite(sprayer, LOW);
+        sprayOn = false;
+        sprayTimer = currentMillis;
         toSpray--;
         spraysLeft--;
         updateIntToEEPROM(0, spraysLeft);
-        sprayOn = false;
-        sprayTimer = currentMillis;
+      }
+
+      // if no more sprays are needed, exit to state 0
+      if (toSpray == 0) {
+        // digitalWrite(ledRed, HIGH);
+        state = notInUse;
       }
       break;
-
+    }
     /* ===== operator menu ===== */
     case 6:
       setLeds(0,0,0,0);
@@ -148,7 +148,8 @@ void loop() {
     case 7:
       setLeds(0,0,0,0);
 
-      if (currentMillis - exitTimer > 15000) {
+      if (currentMillis - exitTimer > 10000) {
+        purge();
         state = notInUse;
       }
 
@@ -182,9 +183,11 @@ void loop() {
 
     /* ===== spray delay ===== */
     case 9:
-      setLeds(1,1,0,0);
+      setLeds(1,0,1,0);
 
       if (currentMillis - exitTimer > sprayDelay) {
+        sprayTimer = millis();
+        sprayOn = false;
         state = stateTriggered;
       }
 
@@ -201,53 +204,68 @@ void loop() {
           setLeds(1,1,0,0); 
           break;
         case inUse2: 
-          setLeds(1,1,0,3); 
+          setLeds(1,1,0,4); 
           break;
         case inUseCleaning: 
-          setLeds(1,0,0,1); 
+          setLeds(1,1,0,1); 
           break;
       }
 
+      checkTemp(1000);
       checkLight(100);
       checkDistance(200);
       checkMagnet(75);
 
-      if (state == inUseUnknown && doorClosed && (useStart - millis() > 15000)) {
-        state = inUse1;
-      }
+      if (currentMillis - useStart > 10000) {
+        if (state == inUseUnknown && doorClosed) {
+          state = inUse1;
+          toSpray = 1;
+        }
 
-      if (bigFlush && doorClosed) {
-        state = inUse2;
-      }
+        if (bigFlush && doorClosed) {
+          state = inUse2;
+          toSpray = 2;
+        }
 
-      if (!doorClosed && (useStart - millis() > 15000)) {
-        state = inUseCleaning;
+        if (!doorClosed) {
+          state = inUseCleaning;
+          toSpray = 0;
+        }
       }
 
       if (!lightOn) {
         // light is off, use of toilet ended
 
-        exitTimer = millis();
-        if (useStart - millis() < 20000) {
+        if (useStart - currentMillis < 10000) {
           // use was too short, probably an error, no sprays, return to notInUse
+          exitTimer = currentMillis;
           state = exitMenu;
         }
 
         switch (state) {
+          case inUseUnknown:
+            exitTimer = currentMillis;
+            state = exitMenu;
+            doorClosed = true; // REMOVE
+            break;
           case inUse1:
+            purge();
             toSpray = 1;
+            exitTimer = millis();
             state = delaySpray;
             break;
           case inUse2:
+            purge();
             toSpray = 2;
+            exitTimer = currentMillis;
             state = delaySpray;
             break;
           case inUseCleaning:
+            exitTimer = currentMillis;
             state = exitMenu;
+            doorClosed = true; // REMOVE
             break;
         }
-
-        purge();
       }
 
       break;
@@ -306,7 +324,7 @@ void printLCD() {
       }
       break;
     }
-    case 6:
+    case 6: {
       // MENU
       lcd.setCursor(0,0);
       lcd.print("    MENU    ");
@@ -332,18 +350,19 @@ void printLCD() {
           break;
       }
       break;
+    }
     case 7: {
       lcd.setCursor(0,0);
       lcd.print("Device restarts");
       lcd.setCursor(0,1);
       lcd.print("   in ");
-      int val = 15000 - (currentMillis - exitTimer);
+      int val = 10000 - (currentMillis - exitTimer);
       lcd.print(val / 1000);
       lcd.setCursor(9,1);
       lcd.print("sec");
       break;
     }
-    case 8:
+    case 8: {
       // SENSOR VIEW
       lcd.setCursor(0,0);
       lcd.print("SENSOR: ");
@@ -387,6 +406,7 @@ void printLCD() {
           break;
       }
       break;
+    }
     case 9: {
       lcd.setCursor(0,0);
       lcd.print("waiting to spray");
@@ -394,18 +414,23 @@ void printLCD() {
       lcd.setCursor(0,1);
       lcd.print(time);
       lcd.print("s to go");
+      lcd.setCursor(15,1);
+      lcd.print(toSpray);
       break;
     }
-    default:
+    default: {
       // NORMAL OPERATION
       lcd.setCursor(0,0);
       lcd.print("#sprays: ");
       lcd.print(spraysLeft);
+      lcd.setCursor(15,0);
+      lcd.print(state);
       lcd.setCursor(0,1);
       lcd.print("temp: ");
       lcd.print(temp);
       lcd.print(" C");
       break;
+    }
   }
 }
 
@@ -442,7 +467,7 @@ void checkTemp(int t) {
     temp = sensors.getTempCByIndex(0);
   }
 }
-
+int doorDistance = 86;
 void checkDistance(int t) {
   if (millis() - lastDistanceCheck > t) { 
     lastDistanceCheck = millis();
@@ -453,25 +478,29 @@ void checkDistance(int t) {
     delayMicroseconds(10);
     digitalWrite(distTrigger, LOW);
   
-    long echoTime;
+    unsigned long echoTime = -1UL;
     // get time between trigger and echo
-    echoTime = pulseIn(distEcho, HIGH, 20000);
+    echoTime = pulseIn(distEcho, HIGH, 22000);
   
     // Convert the time into a distance
     distance = ((echoTime/2) / 29.1);
 
-    if (distance > 82 && distance < 88) {
+
+    // if a distance very close to the door distance is registered, increase the timer
+    if (distance > doorDistance - 2 && distance < doorDistance + 2) {
       doorCloseTimer += t;
     }
 
-    if (distance > 88) {
+    // if a distance larger than the distance to the door is registered shrink the timer. (not a full reset as )
+    if (distance >= 88) {
       doorCloseTimer /= 2;
     }
 
-    if (doorCloseTimer > 8) {
+    // if the door seems closed for long enough, register it as closed
+    if (doorCloseTimer > 8000) {
       doorClosed = true;
     } else {
-      doorClosed = false;
+      // doorClosed = false;
     }
   }
 }
@@ -481,7 +510,7 @@ void checkMagnet(int t) {
     lastMagnetCheck = millis();
     magnetContact = digitalRead(magnet);
     if (magnetContact == HIGH) {
-      bigFlush = millis();
+      bigFlush = true;
     }
   }
 }
@@ -492,7 +521,6 @@ void checkMotion(int t) {
     motionDetected = digitalRead(motion);
     if (motionDetected == HIGH) {
       lastMotion = millis();
-      bigFlush = true;
     }
   }
 }
